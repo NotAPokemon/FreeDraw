@@ -24,8 +24,6 @@ public class ToolSelector extends GUI {
 
   private boolean erasing;
   private boolean selecting;
-  private boolean graphMode;
-
   @Override
   protected void drawGUI() {
     loadStyle("mainBar");
@@ -39,7 +37,7 @@ public class ToolSelector extends GUI {
         erasing ? "tool-active" : "tool-inactive");
     drawGhostButton("Clear", CLEAR_X, BUTTON_Y, TOOL_WIDTH, BUTTON_HEIGHT, "clear");
     drawGhostButton("XY Graph", GRAPH_X, BUTTON_Y, GRAPH_WIDTH, BUTTON_HEIGHT,
-        graphMode ? "graph-active" : "tool-inactive");
+        screen.board != null && screen.board.isGraphMode() ? "graph-active" : "tool-inactive");
     drawGhostButton("Export PDF", EXPORT_X, BUTTON_Y, EXPORT_WIDTH, BUTTON_HEIGHT, "tool-inactive");
     drawGhostButton("Save", SAVE_X, BUTTON_Y, FILE_BUTTON_WIDTH, BUTTON_HEIGHT, "tool-inactive");
     drawGhostButton("Load", LOAD_X, BUTTON_Y, FILE_BUTTON_WIDTH, BUTTON_HEIGHT, "tool-inactive");
@@ -84,8 +82,7 @@ public class ToolSelector extends GUI {
       screen.board.clear();
       cancelEvent();
     } else if (hitTest(GRAPH_X, BUTTON_Y, GRAPH_WIDTH, BUTTON_HEIGHT)) {
-      graphMode = !graphMode;
-      screen.board.setGraphMode(graphMode);
+      screen.board.setGraphMode(!screen.board.isGraphMode());
       cancelEvent();
     } else if (hitTest(EXPORT_X, BUTTON_Y, EXPORT_WIDTH, BUTTON_HEIGHT)) {
       screen.exportPdf();
@@ -100,10 +97,6 @@ public class ToolSelector extends GUI {
       screen.saveProjectAs();
       cancelEvent();
     }
-  }
-
-  void setGraphMode(boolean graphMode) {
-    this.graphMode = graphMode;
   }
 
   private void addButtonStyles(String name, int background, int hoverBackground, int textColor) {

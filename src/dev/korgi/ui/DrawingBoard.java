@@ -33,7 +33,7 @@ import processing.core.PImage;
 public class DrawingBoard extends GUI {
 
   private static final int PROJECT_MAGIC = 0x46524457;
-  private static final int PROJECT_VERSION = 1;
+  private static final int PROJECT_VERSION = 2;
   private static final long MAX_PROJECT_SIZE = 512L * 1024 * 1024;
   private static final int MAX_PAGE_COUNT = 1000;
   private static final int MAX_STROKES_PER_PAGE = 100_000;
@@ -68,7 +68,6 @@ public class DrawingBoard extends GUI {
   private boolean selectingRegion;
   private boolean movingSelection;
   private boolean selectionMoveRecorded;
-  private boolean graphMode;
   private Stroke activeStroke;
   private Point selectionStart;
   private Point selectionEnd;
@@ -95,7 +94,7 @@ public class DrawingBoard extends GUI {
       drawPageBackground(page.background);
     }
 
-    if (graphMode) {
+    if (page.graphMode) {
       drawGraph();
     }
 
@@ -247,11 +246,12 @@ public class DrawingBoard extends GUI {
   }
 
   void setGraphMode(boolean graphMode) {
-    if (this.graphMode == graphMode) {
+    Page page = getCurrentPage();
+    if (page.graphMode == graphMode) {
       return;
     }
     recordEdit();
-    this.graphMode = graphMode;
+    page.graphMode = graphMode;
   }
 
   void clear() {
@@ -321,7 +321,7 @@ public class DrawingBoard extends GUI {
   }
 
   boolean isGraphMode() {
-    return graphMode;
+    return getCurrentPage().graphMode;
   }
 
   void saveProject(File file) throws IOException {
@@ -329,7 +329,6 @@ public class DrawingBoard extends GUI {
         new BufferedOutputStream(Files.newOutputStream(file.toPath())))) {
       output.writeInt(PROJECT_MAGIC);
       output.writeInt(PROJECT_VERSION);
-      output.writeBoolean(graphMode);
       output.writeInt(currentPageIndex);
       output.writeInt(pages.size());
 
@@ -341,6 +340,7 @@ public class DrawingBoard extends GUI {
           output.write(imageBytes);
         }
 
+        output.writeBoolean(page.graphMode);
         output.writeInt(page.strokes.size());
         for (Stroke stroke : page.strokes) {
           output.writeBoolean(stroke.erasing);
@@ -355,21 +355,26 @@ public class DrawingBoard extends GUI {
   }
 
   void loadProject(File file) throws IOException {
-    int currentPageBeforeLoad = currentPageIndex;
     long fileSize = Files.size(file.toPath());
     if (fileSize > MAX_PROJECT_SIZE) {
       throw new IOException("Project file is too large.");
     }
 
     List<Page> loadedPages = new ArrayList<>();
-    boolean loadedGraphMode;
+    boolean legacyGraphMode = false;
     int loadedCurrentPage;
     try (DataInputStream input = new DataInputStream(
         new BufferedInputStream(Files.newInputStream(file.toPath())))) {
-      if (input.readInt() != PROJECT_MAGIC || input.readInt() != PROJECT_VERSION) {
+      if (input.readInt() != PROJECT_MAGIC) {
         throw new IOException("This is not a supported FreeDraw project.");
       }
-      loadedGraphMode = input.readBoolean();
+      int projectVersion = input.readInt();
+      if (projectVersion < 1 || projectVersion > PROJECT_VERSION) {
+        throw new IOException("This is not a supported FreeDraw project.");
+      }
+      if (projectVersion == 1) {
+        legacyGraphMode = input.readBoolean();
+      }
       loadedCurrentPage = input.readInt();
       int pageCount = input.readInt();
       if (pageCount < 1 || pageCount > MAX_PAGE_COUNT
@@ -390,6 +395,7 @@ public class DrawingBoard extends GUI {
         }
 
         Page page = new Page(background);
+        page.graphMode = projectVersion == 1 ? legacyGraphMode : input.readBoolean();
         int strokeCount = input.readInt();
         if (strokeCount < 0 || strokeCount > MAX_STROKES_PER_PAGE) {
           throw new IOException("The project contains an invalid number of strokes.");
@@ -418,8 +424,7 @@ public class DrawingBoard extends GUI {
 
     pages.clear();
     pages.addAll(loadedPages);
-    currentPageIndex = Math.min(currentPageBeforeLoad, pages.size() - 1);
-    graphMode = loadedGraphMode;
+    currentPageIndex = Math.min(loadedCurrentPage, pages.size() - 1);
     undoHistory.clear();
     redoHistory.clear();
     stopDrawing();
@@ -479,7 +484,7 @@ public class DrawingBoard extends GUI {
       graphics.drawImage(background, (result.getWidth() - width) / 2, (result.getHeight() - height) / 2,
           width, height, null);
     }
-    if (graphMode) {
+    if (page.graphMode) {
       drawGraph(graphics, result.getWidth(), result.getHeight());
     }
 
@@ -517,10 +522,16 @@ public class DrawingBoard extends GUI {
     int axisY = height / 2;
     graphics.setStroke(new BasicStroke(1));
     graphics.setColor(new Color(220, 227, 236));
-    for (int x = axisX % GRAPH_SPACING; x < width; x += GRAPH_SPACING) {
+    for (int x = axisX; x >= 0; x -= GRAPH_SPACING) {
       graphics.drawLine(x, 0, x, height);
     }
-    for (int y = 0; y < height; y += GRAPH_SPACING) {
+    for (int x = axisX + GRAPH_SPACING; x < width; x += GRAPH_SPACING) {
+      graphics.drawLine(x, 0, x, height);
+    }
+    for (int y = axisY; y >= 0; y -= GRAPH_SPACING) {
+      graphics.drawLine(0, y, width, y);
+    }
+    for (int y = axisY + GRAPH_SPACING; y < height; y += GRAPH_SPACING) {
       graphics.drawLine(0, y, width, y);
     }
     graphics.setStroke(new BasicStroke(2));
@@ -779,19 +790,16 @@ public class DrawingBoard extends GUI {
       for (Stroke stroke : page.strokes) {
         copy.strokes.add(copyStroke(stroke, 0, 0));
       }
+      copy.graphMode = page.graphMode;
       pageCopies.add(copy);
     }
-    return new HistoryState(pageCopies, currentPageIndex, graphMode);
+    return new HistoryState(pageCopies, currentPageIndex);
   }
 
   private void restoreHistoryState(HistoryState state) {
     pages.clear();
     pages.addAll(state.pages);
     currentPageIndex = state.currentPageIndex;
-    graphMode = state.graphMode;
-    if (screen.selector != null) {
-      screen.selector.setGraphMode(graphMode);
-    }
     stopDrawing();
     selectionStart = null;
     selectionEnd = null;
@@ -883,57 +891,64 @@ public class DrawingBoard extends GUI {
   }
 
   private void drawGraph() {
+    float graphTop = Math.min(TOOLBAR_HEIGHT, screen.height);
     float axisX = screen.width / 2f;
-    float axisY = TOOLBAR_HEIGHT + (screen.height - TOOLBAR_HEIGHT) / 2f;
+    float axisY = graphTop + Math.max(0, screen.height - graphTop) / 2f;
 
     screen.stroke(0xFFDCE3EC);
     screen.strokeWeight(1);
-    for (int x = Math.round(axisX) % GRAPH_SPACING; x < screen.width; x += GRAPH_SPACING) {
-      screen.line(x, TOOLBAR_HEIGHT, x, screen.height);
+    int graphAxisX = Math.round(axisX);
+    int graphAxisY = Math.round(axisY);
+    for (int x = graphAxisX; x >= 0; x -= GRAPH_SPACING) {
+      screen.line(x, graphTop, x, screen.height);
     }
-    int firstGridY = TOOLBAR_HEIGHT
-        + (GRAPH_SPACING - (TOOLBAR_HEIGHT % GRAPH_SPACING)) % GRAPH_SPACING;
-    for (int y = firstGridY; y < screen.height; y += GRAPH_SPACING) {
+    for (int x = graphAxisX + GRAPH_SPACING; x < screen.width; x += GRAPH_SPACING) {
+      screen.line(x, graphTop, x, screen.height);
+    }
+    for (int y = graphAxisY; y >= graphTop; y -= GRAPH_SPACING) {
+      screen.line(0, y, screen.width, y);
+    }
+    for (int y = graphAxisY + GRAPH_SPACING; y < screen.height; y += GRAPH_SPACING) {
       screen.line(0, y, screen.width, y);
     }
 
     screen.stroke(0xFF526174);
     screen.strokeWeight(2);
-    screen.line(0, axisY, screen.width, axisY);
-    screen.line(axisX, TOOLBAR_HEIGHT, axisX, screen.height);
+    screen.line(0, graphAxisY, screen.width, graphAxisY);
+    screen.line(graphAxisX, graphTop, graphAxisX, screen.height);
 
     screen.noStroke();
     screen.fill(0xFF59677A);
     screen.textSize(12);
     screen.textAlign(Screen.LEFT, Screen.CENTER);
-    for (int y = Math.round(axisY) - GRAPH_SPACING * GRAPH_LABEL_INTERVAL; y >= TOOLBAR_HEIGHT; y -= GRAPH_SPACING
+    for (int y = graphAxisY - GRAPH_SPACING * GRAPH_LABEL_INTERVAL; y >= graphTop; y -= GRAPH_SPACING
         * GRAPH_LABEL_INTERVAL) {
-      int value = (int) ((axisY - y) / GRAPH_SPACING);
+      int value = (int) ((graphAxisY - y) / GRAPH_SPACING);
       screen.text(Integer.toString(value), axisX + 8, y);
     }
-    for (int y = Math.round(axisY) + GRAPH_SPACING * GRAPH_LABEL_INTERVAL; y < screen.height; y += GRAPH_SPACING
+    for (int y = graphAxisY + GRAPH_SPACING * GRAPH_LABEL_INTERVAL; y < screen.height; y += GRAPH_SPACING
         * GRAPH_LABEL_INTERVAL) {
-      int value = (int) ((axisY - y) / GRAPH_SPACING);
+      int value = (int) ((graphAxisY - y) / GRAPH_SPACING);
       screen.text(Integer.toString(value), axisX + 8, y);
     }
 
     screen.textAlign(Screen.CENTER, Screen.TOP);
     screen.text("0", axisX, axisY + 6);
-    for (int x = Math.round(axisX) - GRAPH_SPACING * GRAPH_LABEL_INTERVAL; x >= 0; x -= GRAPH_SPACING
+    for (int x = graphAxisX - GRAPH_SPACING * GRAPH_LABEL_INTERVAL; x >= 0; x -= GRAPH_SPACING
         * GRAPH_LABEL_INTERVAL) {
-      int value = (int) ((x - axisX) / GRAPH_SPACING);
+      int value = (int) ((x - graphAxisX) / GRAPH_SPACING);
       screen.text(Integer.toString(value), x, axisY + 6);
     }
-    for (int x = Math.round(axisX) + GRAPH_SPACING * GRAPH_LABEL_INTERVAL; x < screen.width; x += GRAPH_SPACING
+    for (int x = graphAxisX + GRAPH_SPACING * GRAPH_LABEL_INTERVAL; x < screen.width; x += GRAPH_SPACING
         * GRAPH_LABEL_INTERVAL) {
-      int value = (int) ((x - axisX) / GRAPH_SPACING);
+      int value = (int) ((x - graphAxisX) / GRAPH_SPACING);
       screen.text(Integer.toString(value), x, axisY + 6);
     }
 
     screen.textAlign(Screen.RIGHT, Screen.TOP);
     screen.text("x", screen.width - 8, axisY + 6);
     screen.textAlign(Screen.LEFT, Screen.TOP);
-    screen.text("y", axisX + 8, TOOLBAR_HEIGHT + 4);
+    screen.text("y", axisX + 8, graphTop + 4);
   }
 
   private static class Stroke {
@@ -950,6 +965,7 @@ public class DrawingBoard extends GUI {
     private final PImage background;
     private PGraphics annotations;
     private boolean annotationsDirty = true;
+    private boolean graphMode;
 
     private Page() {
       this(null);
@@ -963,12 +979,10 @@ public class DrawingBoard extends GUI {
   private static class HistoryState {
     private final List<Page> pages;
     private final int currentPageIndex;
-    private final boolean graphMode;
 
-    private HistoryState(List<Page> pages, int currentPageIndex, boolean graphMode) {
+    private HistoryState(List<Page> pages, int currentPageIndex) {
       this.pages = pages;
       this.currentPageIndex = currentPageIndex;
-      this.graphMode = graphMode;
     }
   }
 

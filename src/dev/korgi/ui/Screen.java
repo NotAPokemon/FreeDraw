@@ -169,7 +169,6 @@ public class Screen extends PApplet {
         file -> enqueueFileOperation(() -> {
           try {
             board.loadProject(file);
-            selector.setGraphMode(board.isGraphMode());
             currentProjectFile = file.getAbsoluteFile();
             rememberFolder(currentProjectFile.getParentFile());
           } catch (IOException | RuntimeException e) {
