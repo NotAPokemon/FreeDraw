@@ -1,0 +1,17 @@
+package dev.korgi.json;
+
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+/**
+ * Represents an object whos update through the network should be changed
+ * 
+ * @author @Author
+ */
+@Retention(RetentionPolicy.RUNTIME)
+@Target(ElementType.FIELD)
+public @interface JSONFillOverride {
+    String value();
+}

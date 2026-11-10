@@ -1,0 +1,896 @@
+package dev.korgi.json;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Array;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Modifier;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Represents a JSON object, which can be used to send data over the network
+ * 
+ * @author Arvan
+ */
+public class JSONObject {
+
+    private Map<String, Object> values = new HashMap<>();
+
+    public JSONObject() {
+    }
+
+    public JSONObject(Object obj) {
+        if (obj == null)
+            return;
+
+        if (obj instanceof Map) {
+            Map<?, ?> map = (Map<?, ?>) obj;
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                String key = entry.getKey().toString();
+                Object value = wrapValue(entry.getValue());
+                values.put(key, value);
+            }
+        } else {
+            Class<?> clazz = obj.getClass();
+            List<Field> fields = getAllFields(clazz);
+
+            for (Field field : fields) {
+                field.setAccessible(true);
+                try {
+                    Object value = field.get(obj);
+                    values.put(field.getName(), wrapValue(value));
+                } catch (IllegalAccessException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
+    private static List<Field> getAllFields(Class<?> clazz) {
+        List<Field> fields = new ArrayList<>();
+        while (clazz != null && clazz != Object.class) {
+            for (Field field : clazz.getDeclaredFields()) {
+                int mods = field.getModifiers();
+                if (Modifier.isStatic(mods) || Modifier.isFinal(mods) || field.isAnnotationPresent(JSONIgnore.class)) {
+                    continue;
+                }
+                fields.add(field);
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return fields;
+    }
+
+    private Object wrapValue(Object value) {
+        if (value == null)
+            return null;
+
+        Class<?> clazz = value.getClass();
+
+        if (isPrimitiveOrWrapper(clazz) || value instanceof String) {
+            return value;
+        } else if (clazz.isArray()) {
+            int length = Array.getLength(value);
+            Object[] arr = new Object[length];
+            for (int i = 0; i < length; i++) {
+                arr[i] = wrapValue(Array.get(value, i));
+            }
+            return arr;
+        } else if (value instanceof List) {
+            List<?> list = (List<?>) value;
+            List<Object> wrappedList = new ArrayList<>();
+            for (Object elem : list)
+                wrappedList.add(wrapValue(elem));
+            return wrappedList;
+        } else if (value instanceof Map) {
+            Map<?, ?> map = (Map<?, ?>) value;
+            Map<String, Object> wrappedMap = new HashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                wrappedMap.put(entry.getKey().toString(), wrapValue(entry.getValue()));
+            }
+            return wrappedMap;
+        } else if (value instanceof JSONObject) {
+            return value;
+        } else {
+            JSONObject obj = new JSONObject(value);
+            obj.set("_type", clazz.getName());
+            return obj;
+        }
+    }
+
+    private boolean isPrimitiveOrWrapper(Class<?> clazz) {
+        return clazz.isPrimitive()
+                || clazz == Integer.class
+                || clazz == Double.class
+                || clazz == Float.class
+                || clazz == Long.class
+                || clazz == Short.class
+                || clazz == Byte.class
+                || clazz == Boolean.class
+                || clazz == Character.class;
+    }
+
+    public boolean hasKey(String... keys) {
+        for (String key : keys) {
+            if (!values.containsKey(key))
+                return false;
+        }
+        return true;
+    }
+
+    public JSONObject set(String key, Object value) {
+        values.put(key, wrapValue(value));
+        return this;
+    }
+
+    public Map<String, Object> toMap() {
+        return values;
+    }
+
+    @Override
+    public String toString() {
+        return toJSONString();
+    }
+
+    public String toJSONString() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        int i = 0;
+        for (Map.Entry<String, Object> entry : values.entrySet()) {
+            sb.append("\"").append(escape(entry.getKey())).append("\":");
+            sb.append(valueToJSONString(entry.getValue()));
+            if (i < values.size() - 1)
+                sb.append(",");
+            i++;
+        }
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private String valueToJSONString(Object value) {
+        if (value == null)
+            return "null";
+        if (value instanceof String)
+            return "\"" + escape((String) value) + "\"";
+        if (value instanceof Number || value instanceof Boolean)
+            return value.toString();
+        if (value instanceof JSONObject)
+            return valueToJSONString(((JSONObject) value).values);
+        if (value instanceof Map) {
+            return new JSONObject(value).toJSONString();
+        }
+        if (value instanceof List) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("[");
+            List<?> list = (List<?>) value;
+            for (int i = 0; i < list.size(); i++) {
+                sb.append(valueToJSONString(list.get(i)));
+                if (i < list.size() - 1)
+                    sb.append(",");
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+        if (value.getClass().isArray()) {
+            int length = Array.getLength(value);
+            StringBuilder sb = new StringBuilder();
+            sb.append("[");
+            for (int i = 0; i < length; i++) {
+                sb.append(valueToJSONString(Array.get(value, i)));
+                if (i < length - 1)
+                    sb.append(",");
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+        System.out.println(value.getClass());
+        return new JSONObject(value).toJSONString();
+    }
+
+    private String escape(String str) {
+        return str.replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\b", "\\b")
+                .replace("\f", "\\f")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t");
+    }
+
+    public String getString(String key) {
+        Object value = values.get(key);
+        return value != null ? value.toString() : null;
+    }
+
+    public Integer getInt(String key) {
+        Object value = values.get(key);
+        if (value instanceof Number)
+            return ((Number) value).intValue();
+        return null;
+    }
+
+    public Double getDouble(String key) {
+        Object value = values.get(key);
+        if (value instanceof Number)
+            return ((Number) value).doubleValue();
+        return null;
+    }
+
+    public Boolean getBoolean(String key) {
+        Object value = values.get(key);
+        if (value instanceof Boolean)
+            return (Boolean) value;
+        return null;
+    }
+
+    public Long getLong(String key) {
+        Object value = values.get(key);
+        if (value instanceof Number)
+            return ((Number) value).longValue();
+        return null;
+    }
+
+    public Float getFloat(String key) {
+        Object value = values.get(key);
+        if (value instanceof Number)
+            return ((Number) value).floatValue();
+        return null;
+    }
+
+    public Character getChar(String key) {
+        Object value = values.get(key);
+        if (value instanceof Character)
+            return (Character) value;
+        if (value instanceof String && ((String) value).length() == 1)
+            return ((String) value).charAt(0);
+        return null;
+    }
+
+    public JSONObject getJSONObject(String key) {
+        Object value = values.get(key);
+        if (value instanceof JSONObject)
+            return (JSONObject) value;
+        return null;
+    }
+
+    private static final byte TAG_NULL = 0x00;
+    private static final byte TAG_BOOLEAN = 0x01;
+    private static final byte TAG_INT = 0x02;
+    private static final byte TAG_LONG = 0x03;
+    private static final byte TAG_DOUBLE = 0x04;
+    private static final byte TAG_FLOAT = 0x05;
+    private static final byte TAG_STRING = 0x06;
+    private static final byte TAG_OBJECT = 0x07;
+    private static final byte TAG_ARRAY = 0x08;
+    private static final byte TAG_CHAR = 0x09;
+
+    public byte[] getBytes() {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        DataOutputStream dos = new DataOutputStream(baos);
+        try {
+            writeObject(dos, this);
+            dos.flush();
+        } catch (IOException e) {
+            throw new RuntimeException("Serialization failed", e);
+        }
+        return baos.toByteArray();
+    }
+
+    private void writeObject(DataOutputStream dos, JSONObject obj) throws IOException {
+        Map<String, Object> map = obj.values;
+        dos.writeInt(map.size());
+        for (Map.Entry<String, Object> entry : map.entrySet()) {
+            writeString(dos, entry.getKey());
+            writeValue(dos, entry.getValue());
+        }
+    }
+
+    private void writeValue(DataOutputStream dos, Object value) throws IOException {
+        if (value == null) {
+            dos.writeByte(TAG_NULL);
+        } else if (value instanceof Boolean) {
+            dos.writeByte(TAG_BOOLEAN);
+            dos.writeBoolean((Boolean) value);
+        } else if (value instanceof Integer) {
+            dos.writeByte(TAG_INT);
+            dos.writeInt((Integer) value);
+        } else if (value instanceof Long) {
+            dos.writeByte(TAG_LONG);
+            dos.writeLong((Long) value);
+        } else if (value instanceof Double) {
+            dos.writeByte(TAG_DOUBLE);
+            dos.writeDouble((Double) value);
+        } else if (value instanceof Float) {
+            dos.writeByte(TAG_FLOAT);
+            dos.writeFloat((Float) value);
+        } else if (value instanceof Character) {
+            dos.writeByte(TAG_CHAR);
+            dos.writeChar((Character) value);
+        } else if (value instanceof String) {
+            dos.writeByte(TAG_STRING);
+            writeString(dos, (String) value);
+        } else if (value instanceof JSONObject) {
+            dos.writeByte(TAG_OBJECT);
+            writeObject(dos, (JSONObject) value);
+        } else if (value instanceof List) {
+            dos.writeByte(TAG_ARRAY);
+            List<?> list = (List<?>) value;
+            dos.writeInt(list.size());
+            for (Object elem : list)
+                writeValue(dos, elem);
+        } else if (value instanceof Object[]) {
+            dos.writeByte(TAG_ARRAY);
+            Object[] arr = (Object[]) value;
+            dos.writeInt(arr.length);
+            for (Object elem : arr)
+                writeValue(dos, elem);
+        } else if (value instanceof Map) {
+            dos.writeByte(TAG_OBJECT);
+            writeObject(dos, new JSONObject(value));
+        } else {
+            dos.writeByte(TAG_NULL);
+        }
+    }
+
+    private void writeString(DataOutputStream dos, String s) throws IOException {
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+        dos.writeInt(bytes.length);
+        dos.write(bytes);
+    }
+
+    public static JSONObject fromBytes(byte[] bytes) {
+        DataInputStream dis = new DataInputStream(new ByteArrayInputStream(bytes));
+        try {
+            return readObject(dis);
+        } catch (IOException e) {
+            throw new RuntimeException("Deserialization failed", e);
+        }
+    }
+
+    private static Object readValue(DataInputStream dis) throws IOException {
+        byte tag = dis.readByte();
+        return switch (tag) {
+            case TAG_NULL -> null;
+            case TAG_BOOLEAN -> dis.readBoolean();
+            case TAG_INT -> dis.readInt();
+            case TAG_LONG -> dis.readLong();
+            case TAG_DOUBLE -> dis.readDouble();
+            case TAG_FLOAT -> dis.readFloat();
+            case TAG_CHAR -> dis.readChar();
+            case TAG_STRING -> readString(dis);
+            case TAG_OBJECT -> readObject(dis);
+            case TAG_ARRAY -> {
+                int size = dis.readInt();
+                List<Object> list = new ArrayList<>(size);
+                for (int i = 0; i < size; i++)
+                    list.add(readValue(dis));
+                yield list;
+            }
+            default -> throw new RuntimeException("Unknown type tag: 0x" + Integer.toHexString(tag & 0xFF));
+        };
+    }
+
+    private static JSONObject readObject(DataInputStream dis) throws IOException {
+        int count = dis.readInt();
+        JSONObject obj = new JSONObject();
+        for (int i = 0; i < count; i++) {
+            String key = readString(dis);
+            Object value = readValue(dis);
+            obj.values.put(key, value);
+        }
+        return obj;
+    }
+
+    private static String readString(DataInputStream dis) throws IOException {
+        int len = dis.readInt();
+        byte[] bytes = new byte[len];
+        dis.readFully(bytes);
+        return new String(bytes, StandardCharsets.UTF_8);
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<String> getStringList(String key) {
+        Object value = values.get(key);
+        if (value instanceof List)
+            return (List<String>) value;
+        if (value instanceof Object[])
+            return Arrays.asList(Arrays.copyOf((Object[]) value, ((Object[]) value).length, String[].class));
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Integer> getIntList(String key) {
+        Object value = values.get(key);
+        if (value instanceof List)
+            return (List<Integer>) value;
+        if (value instanceof Object[]) {
+            Object[] arr = (Object[]) value;
+            List<Integer> list = new ArrayList<>();
+            for (Object o : arr)
+                list.add(((Number) o).intValue());
+            return list;
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Double> getDoubleList(String key) {
+        Object value = values.get(key);
+        if (value instanceof List)
+            return (List<Double>) value;
+        if (value instanceof Object[]) {
+            Object[] arr = (Object[]) value;
+            List<Double> list = new ArrayList<>();
+            for (Object o : arr)
+                list.add(((Number) o).doubleValue());
+            return list;
+        }
+        return null;
+    }
+
+    @SuppressWarnings("unchecked")
+    public List<Boolean> getBooleanList(String key) {
+        Object value = values.get(key);
+        if (value instanceof List)
+            return (List<Boolean>) value;
+        if (value instanceof Object[]) {
+            Object[] arr = (Object[]) value;
+            List<Boolean> list = new ArrayList<>();
+            for (Object o : arr)
+                list.add((Boolean) o);
+            return list;
+        }
+        return null;
+    }
+
+    public JSONObject addString(String key, String value) {
+        if (!hasKey(key)) {
+            set(key, value);
+        }
+        return this;
+    }
+
+    public JSONObject addInt(String key, int value) {
+        if (!hasKey(key)) {
+            set(key, value);
+        }
+        return this;
+    }
+
+    public JSONObject addDouble(String key, double value) {
+        if (!hasKey(key)) {
+            set(key, value);
+        }
+        return this;
+    }
+
+    public JSONObject addBoolean(String key, boolean value) {
+        if (!hasKey(key)) {
+            set(key, value);
+        }
+        return this;
+    }
+
+    public JSONObject addLong(String key, long value) {
+        if (!hasKey(key)) {
+            set(key, value);
+        }
+        return this;
+    }
+
+    public JSONObject addFloat(String key, float value) {
+        if (!hasKey(key)) {
+            set(key, value);
+        }
+        return this;
+    }
+
+    public JSONObject addChar(String key, char value) {
+        if (!hasKey(key)) {
+            set(key, value);
+        }
+        return this;
+    }
+
+    @SuppressWarnings("unchecked")
+    public <T> void addToList(String key, T value) {
+        Object existing = values.get(key);
+        List<Object> list;
+        if (existing instanceof List) {
+            list = (List<Object>) existing;
+        } else if (existing != null && existing.getClass().isArray()) {
+            list = new ArrayList<>(Arrays.asList((Object[]) existing));
+        } else {
+            list = new ArrayList<>();
+            if (existing != null)
+                list.add(existing);
+        }
+        list.add(value);
+        values.put(key, list);
+    }
+
+    public static JSONObject fromJSONString(String json) throws RuntimeException {
+        JSONParser parser = new JSONParser(json);
+        return parser.parseObject();
+    }
+
+    public static JSONObject fromResource(String name) {
+        try {
+            InputStream in = JSONObject.class
+                    .getClassLoader()
+                    .getResourceAsStream("resources/%s.json".formatted(name));
+
+            if (in != null) {
+                String json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                return JSONObject.fromJSONString(json);
+            }
+        } catch (IOException e) {
+            throw new Error(e);
+        }
+
+        return null;
+    }
+
+    @SuppressWarnings("unused")
+    public static JSONObject fromFile(File file) {
+        InputStream in = null;
+        try {
+            in = new FileInputStream(file);
+
+            if (in != null) {
+                String json = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                return JSONObject.fromJSONString(json);
+            }
+        } catch (IOException e) {
+            throw new Error(e);
+        } finally {
+            if (in != null) {
+                try {
+                    in.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+        return null;
+    }
+
+    public void fillObject(Object target) {
+        if (target == null)
+            return;
+
+        Class<?> clazz = target.getClass();
+        List<Field> fields = getAllFields(clazz);
+
+        for (Field field : fields) {
+            field.setAccessible(true);
+            String key = field.getName();
+
+            if (!values.containsKey(key))
+                continue;
+
+            Object value = values.get(key);
+            if (value == null)
+                continue;
+
+            if (field.isAnnotationPresent(JSONFillOverride.class)) {
+                JSONFillOverride annotation = field.getAnnotation(JSONFillOverride.class);
+                String override = annotation.value();
+                try {
+                    target.getClass().getMethod(override, Object.class).invoke(target, value);
+                    continue;
+                } catch (IllegalAccessException | IllegalArgumentException | InvocationTargetException
+                        | NoSuchMethodException | SecurityException e) {
+                    e.printStackTrace();
+                }
+            }
+
+            try {
+                Class<?> type = field.getType();
+
+                if (type == int.class || type == Integer.class) {
+                    field.set(target, ((Number) value).intValue());
+                } else if (type == double.class || type == Double.class) {
+                    field.set(target, ((Number) value).doubleValue());
+                } else if (type == float.class || type == Float.class) {
+                    field.set(target, ((Number) value).floatValue());
+                } else if (type == long.class || type == Long.class) {
+                    field.set(target, ((Number) value).longValue());
+                } else if (type == boolean.class || type == Boolean.class) {
+                    field.set(target, (Boolean) value);
+                } else if (type == char.class || type == Character.class) {
+                    if (value instanceof Character)
+                        field.set(target, value);
+                    else if (value instanceof String && ((String) value).length() > 0)
+                        field.set(target, ((String) value).charAt(0));
+                } else if (type == String.class) {
+                    field.set(target, value.toString());
+                } else if (type.isArray() && value instanceof List<?> list) {
+                    field.set(target, convertListToArray(list, type.getComponentType()));
+                } else if (List.class.isAssignableFrom(type) && value instanceof List<?> list) {
+                    field.set(target, convertListToTypedList(list, field));
+                } else if (value instanceof JSONObject) {
+                    try {
+                        Object nested = type.getDeclaredConstructor().newInstance();
+                        ((JSONObject) value).fillObject(nested);
+                        field.set(target, nested);
+                    } catch (NoSuchMethodException e) {
+
+                    }
+                } else if (value instanceof Map || value instanceof List) {
+                    field.set(target, value);
+                }
+
+            } catch (Exception e) {
+                e.printStackTrace();
+            }
+        }
+    }
+
+    private Object convertListToArray(List<?> list, Class<?> componentType) throws Exception {
+        Object array = Array.newInstance(componentType, list.size());
+
+        for (int i = 0; i < list.size(); i++) {
+            Object elem = list.get(i);
+
+            if (elem instanceof JSONObject jsonObj) {
+                Class<?> targetClass = componentType;
+
+                if (Modifier.isAbstract(componentType.getModifiers()) || componentType.isInterface()) {
+                    String typeName = jsonObj.getString("_type");
+                    if (typeName == null) {
+                        throw new RuntimeException(
+                                "Missing _type information for abstract type: " + componentType.getName());
+                    }
+                    targetClass = Class.forName(typeName);
+                }
+
+                Object nested = targetClass.getDeclaredConstructor().newInstance();
+                jsonObj.fillObject(nested);
+                Array.set(array, i, nested);
+            } else {
+                Array.set(array, i, elem);
+            }
+        }
+        return array;
+    }
+
+    private List<?> convertListToTypedList(List<?> jsonList, Field field) throws Exception {
+        List<Object> result = new ArrayList<>();
+        Class<?> listType = Object.class;
+
+        try {
+            java.lang.reflect.Type genericType = field.getGenericType();
+            if (genericType instanceof java.lang.reflect.ParameterizedType pt) {
+                java.lang.reflect.Type[] typeArgs = pt.getActualTypeArguments();
+                if (typeArgs.length == 1 && typeArgs[0] instanceof Class<?> cls)
+                    listType = cls;
+            }
+        } catch (Exception ignored) {
+            ignored.printStackTrace();
+        }
+
+        for (Object elem : jsonList) {
+            if (elem instanceof JSONObject jsonObj) {
+                Class<?> targetClass = listType;
+
+                if (Modifier.isAbstract(listType.getModifiers()) || listType.isInterface()) {
+                    String typeName = jsonObj.getString("_type");
+                    if (typeName == null) {
+                        throw new RuntimeException(
+                                "Missing _type information for abstract type: " + listType.getName());
+                    }
+                    targetClass = Class.forName(typeName);
+                }
+
+                Object nested = targetClass.getDeclaredConstructor().newInstance();
+                jsonObj.fillObject(nested);
+                result.add(nested);
+            } else if (elem instanceof List && List.class.isAssignableFrom(listType)) {
+                result.add(convertListToTypedList((List<?>) elem, field));
+            } else {
+                result.add(elem);
+            }
+        }
+        return result;
+    }
+
+    public Map<String, Object> getValues() {
+        return values;
+    }
+
+    private static class JSONParser {
+        private final String json;
+        private int pos = 0;
+
+        public JSONParser(String json) {
+            this.json = json.trim();
+        }
+
+        public JSONObject parseObject() {
+            skipWhitespace();
+            if (peek() != '{')
+                throw new RuntimeException("Expected '{' at position " + pos);
+            pos++; // skip '{'
+            JSONObject obj = new JSONObject();
+            skipWhitespace();
+            if (peek() == '}') {
+                pos++;
+                return obj;
+            }
+            while (true) {
+                skipWhitespace();
+                String key = parseString();
+                skipWhitespace();
+                expect(':');
+                skipWhitespace();
+                Object value = parseValue();
+                obj.set(key, value);
+                skipWhitespace();
+                if (peek() == ',') {
+                    pos++;
+                } else if (peek() == '}') {
+                    pos++;
+                    break;
+                } else {
+                    System.out.println(json);
+                    throw new RuntimeException("Expected ',' or '}' at position " + pos);
+                }
+            }
+            return obj;
+        }
+
+        private Object parseValue() {
+            skipWhitespace();
+            char c = peek();
+            if (c == '"')
+                return parseString();
+            if (c == '{')
+                return parseObject();
+            if (c == '[')
+                return parseArray();
+            if (c == 't' || c == 'f')
+                return parseBoolean();
+            if (c == 'n' || c == 'N')
+                return parseNull();
+            return parseNumber();
+        }
+
+        private List<Object> parseArray() {
+            expect('[');
+            List<Object> list = new ArrayList<>();
+            skipWhitespace();
+            if (peek() == ']') {
+                pos++;
+                return list;
+            }
+            while (true) {
+                list.add(parseValue());
+                skipWhitespace();
+                if (peek() == ',') {
+                    pos++;
+                } else if (peek() == ']') {
+                    pos++;
+                    break;
+                } else {
+                    throw new RuntimeException("Expected ',' or ']' at position " + pos);
+                }
+            }
+            return list;
+        }
+
+        private String parseString() {
+            expect('"');
+            StringBuilder sb = new StringBuilder();
+            while (true) {
+                char c = next();
+                if (c == '"')
+                    break;
+                if (c == '\\') {
+                    c = next();
+                    switch (c) {
+                        case '"', '\\', '/' -> sb.append(c);
+                        case 'b' -> sb.append('\b');
+                        case 'f' -> sb.append('\f');
+                        case 'n' -> sb.append('\n');
+                        case 'r' -> sb.append('\r');
+                        case 't' -> sb.append('\t');
+                        default -> throw new RuntimeException("Invalid escape: \\" + c);
+                    }
+                } else
+                    sb.append(c);
+            }
+            return sb.toString();
+        }
+
+        private Boolean parseBoolean() {
+            if (json.startsWith("true", pos)) {
+                pos += 4;
+                return true;
+            } else if (json.startsWith("false", pos)) {
+                pos += 5;
+                return false;
+            }
+            throw new RuntimeException("Invalid boolean at position " + pos);
+        }
+
+        private Object parseNull() {
+            if (json.startsWith("null", pos)) {
+                pos += 4;
+                return null;
+            } else if (json.startsWith("NaN", pos)) {
+                pos += 3;
+                return 0;
+            }
+            throw new RuntimeException("Invalid null at position " + pos);
+        }
+
+        private Number parseNumber() {
+            int start = pos;
+            if (peek() == '-')
+                pos++;
+            boolean hasDot = false;
+            boolean hasExp = false;
+
+            while (pos < json.length()) {
+                char c = peek();
+                if (Character.isDigit(c)) {
+                    pos++;
+                } else if (c == '.' && !hasDot) {
+                    hasDot = true;
+                    pos++;
+                } else if ((c == 'e' || c == 'E') && !hasExp) {
+                    hasExp = true;
+                    pos++;
+                    if (peek() == '+' || peek() == '-')
+                        pos++;
+                } else {
+                    break;
+                }
+            }
+
+            String numberStr = json.substring(start, pos);
+            if (numberStr.contains(".") || numberStr.contains("e") || numberStr.contains("E")) {
+                return Double.parseDouble(numberStr);
+            } else {
+                return Long.parseLong(numberStr);
+            }
+        }
+
+        private void skipWhitespace() {
+            while (pos < json.length() && Character.isWhitespace(json.charAt(pos)))
+                pos++;
+        }
+
+        private char peek() {
+            if (pos >= json.length())
+                return '\0';
+            return json.charAt(pos);
+        }
+
+        private char next() {
+            if (pos >= json.length())
+                throw new RuntimeException("Unexpected end of input");
+            return json.charAt(pos++);
+        }
+
+        private void expect(char expected) {
+            char c = next();
+            if (c != expected)
+                throw new RuntimeException(
+                        "Expected '" + expected + "' but found '" + c + "' at position " + (pos - 1));
+        }
+    }
+}
