@@ -5,6 +5,7 @@ import processing.core.PApplet;
 
 public class Main {
   public static void main(String[] args) {
-    PApplet.main(Screen.class.getName());
+    PApplet.runSketch(new String[] { "FreeDraw" }, Screen.getInstance());
+    Screen.getInstance().windowResizable(true);
   }
 }
